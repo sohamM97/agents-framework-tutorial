@@ -1,7 +1,8 @@
 # pip install agent-framework
 # Use `az login` to authenticate with Azure CLI
-import os
 import asyncio
+import os
+
 from agent_framework import Agent
 from agent_framework.foundry import FoundryChatClient
 from azure.identity import AzureCliCredential
