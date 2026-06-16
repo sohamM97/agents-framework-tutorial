@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-from agent_framework import Agent
+from agent_framework import Agent, AgentSession
 
 # TODO: learn more about ChatClient vs ChatCompletionClient
 from agent_framework.openai import OpenAIChatCompletionClient
@@ -10,12 +10,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def print_as_agent(text: str):
-    print(f"[AGENT]: {text}")
+async def run_agent(agent: Agent, prompt: str, session: AgentSession):
+    response = await agent.run(prompt, session=session, stream=True)
+    print("\n[AGENT]: ", end="", flush=True)
+    async for chunk in response:
+        if chunk.text:
+            print(chunk.text, end="", flush=True)
+    print()
 
 
 async def take_input_from_user() -> str:
-    return await asyncio.to_thread(input, "[USER]: ")
+    return await asyncio.to_thread(input, "\n[USER]: ")
 
 
 async def main():
@@ -37,20 +42,21 @@ async def main():
     )
 
     session = sm_agent.create_session()
-    greeting = await sm_agent.run(
-        "Greet the user, and ask him his requirements in a friendly way.",
+
+    await run_agent(
+        agent=sm_agent,
+        prompt="Greet the user, and ask him his requirements in a friendly way.",
         session=session,
     )
-    print_as_agent(greeting.text)
 
     req = await take_input_from_user()
 
-    sol = await sm_agent.run(
-        f"The following is the user's requirement: `{req}`. Propose him a "
-        "solution in a friendly way.",
+    await run_agent(
+        agent=sm_agent,
+        prompt=f"The following is the user's requirement: `{req}`. Propose him"
+        " a solution in a friendly way.",
         session=session,
     )
-    print_as_agent(sol.text)
 
 
 if __name__ == "__main__":
