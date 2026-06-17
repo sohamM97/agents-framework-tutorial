@@ -21,7 +21,7 @@ class UserSatisfaction(BaseModel):
 async def run_agent(
     agent: Agent,
     prompt: str | Message | list[Message],
-    session: AgentSession,
+    session: Optional[AgentSession] = None,
     options: Optional[dict] = None,
 ) -> Optional[BaseModel]:
     # TODO: Claude Review: don't stream decision/structured calls — when options
@@ -40,6 +40,8 @@ async def run_agent(
             if chunk.text:
                 print(chunk.text, end="", flush=True)
         print()
+        final_response = await response.get_final_response()
+        return final_response.text
 
 
 async def take_input_from_user() -> str:
@@ -58,6 +60,11 @@ async def main():
     # Standing persona/behavior (role, friendly tone, conciseness) lives in
     # instructions — it's true every turn. Per-turn control (greet/propose/
     # summarize) is driven per-run below, which is an intentional design choice.
+    # TODO: does this lead to infinite questions till i explictly ask to stop?
+    # Yes kinda does. need cap on no. of messages as a safeguard. also clearer
+    # system prompts so that the agent does not just keep blabbering on.
+    # Shouldn't just depend on user's satisfaction, as user is never gonna be
+    # satisfied while agent keeps on asking.
     sm_agent = Agent(
         client=client,
         name="AgentSoham",
@@ -65,16 +72,26 @@ async def main():
         " job is to take requests from the user and convert them into concrete"
         " software products. The requests can be features, bugfixes, "
         "deployments, implementations or anything technical, really."
-        "Always adopt a friendly tone with the user. "
-        "Keep your statements concise - within a 100 words,"
-        "unless absolutely necessary.",
+        "Always adopt a friendly tone with the user. Keep asking the user "
+        "follow-up questions and clarifications till he is satisfied with the "
+        "proposal. Keep your statements concise - within a 100 words,"
+        "unless absolutely necessary. Do NOT suggest him to input images"
+        "or screenshots since you don't have that capability right now.",
     )
 
-    # TODO: can we achieve the entire thing in a single loop?
+    # TODO: multi-intent agent like stop, exit etc.
+    sf_agent = Agent(
+        client=client,
+        name="SatisfactionAgent",
+        instructions="You are an agent who is tasked with analysing the user's"
+        " response, and figuring out whether the user is satisfied with the "
+        "proposed solution. In case he is stating his requirements, wants to "
+        "discuss further, and so on, assume he isn't satisfied just yet.",
+    )
 
     session = sm_agent.create_session()
 
-    await run_agent(
+    bot_message = await run_agent(
         agent=sm_agent,
         prompt=Message(
             role="system", contents=["Greet the user, and ask him his requirements."]
@@ -82,79 +99,29 @@ async def main():
         session=session,
     )
 
-    req = await take_input_from_user()
-
-    await run_agent(
-        agent=sm_agent,
-        prompt=[
-            Message(
-                role="system",
-                contents=[
-                    "The following is the user's requirement. "
-                    "Propose him a solution."
-                    "If needed, ask him follow up questions. If you're not "
-                    "asking follow-ups, Ask the user if he is satisfied with "
-                    "this proposal, or whether he wants to discuss it further."
-                ],
-            ),
-            Message(role="user", contents=[req]),
-        ],
-        session=session,
-    )
-
-    # TODO: Claude Review: run the satisfaction classifier on a SEPARATE session
-    # (or a small dedicated agent), not `session`. Right now each structured call
-    # appends its "figure out if satisfied" prompt + JSON answer into the shared
-    # history, polluting the user-facing thread and wasting tokens. Keep the
-    # decision out-of-band (lightweight LLM-as-judge pattern).
-    # TODO: Claude Review: loop-and-a-half — this take-input + classify block is
-    # duplicated inside the loop. Collapse to a single `while True:` with a
-    # `break`, and factor the classifier prompt into one helper.
-    user_response = await take_input_from_user()
-
-    user_satisfaction_info = await run_agent(
-        agent=sm_agent,
-        prompt=[
-            Message(
-                role="system",
-                contents=[
-                    "The following is the user's response to your "
-                    "solution. Figure out if the user is satisfied it. In case"
-                    " he wants to discuss this further, assume he isn't "
-                    "satisfied just yet."
-                ],
-            ),
-            Message(role="user", contents=[user_response]),
-        ],
-        session=session,
-        options={"response_format": UserSatisfaction},
-    )
-
-    satisfied = user_satisfaction_info and user_satisfaction_info.satisfied
-
-    while not satisfied:
-        await run_agent(
-            agent=sm_agent,
-            prompt="The user is not entirely satisfied with your solution. "
-            "He needs to discuss some more points before giving a go ahead."
-            "Clarify whatever he needs and then ask him again whether we're "
-            "good to go.",
-            session=session,
-        )
-
+    while True:
         user_response = await take_input_from_user()
-
         user_satisfaction_info = await run_agent(
-            agent=sm_agent,
-            prompt="The following is the user's response to your solution: "
-            f"`{user_response}`. Figure out if the user is satisfied. In "
-            "case he wants to discuss this further, assume he isn't satisfied "
-            "just yet.",
-            session=session,
+            agent=sf_agent,
+            prompt=[
+                Message(
+                    role="user",
+                    contents=[
+                        f"Assistant's proposal:\n{bot_message}\n\nUser's reply:\n{user_response}"
+                    ],
+                )
+            ],
             options={"response_format": UserSatisfaction},
         )
 
         satisfied = user_satisfaction_info and user_satisfaction_info.satisfied
+
+        if satisfied:
+            break
+
+        bot_message = await run_agent(
+            agent=sm_agent, prompt=user_response, session=session
+        )
 
     # once user is satisfied
 
@@ -165,6 +132,8 @@ async def main():
         "product shortly.",
         session=session,
     )
+    # TODO: a tool to output the plan in a text file. maybe a summary of the transcript too.
+    # With confirmation from user.
 
 
 if __name__ == "__main__":
