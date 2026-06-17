@@ -35,7 +35,7 @@ async def run_agent(
         return final_response.value
 
     else:
-        print("\n[AGENT]: ...", flush=True)
+        print("\n[AGENT]: ...")
         async for chunk in response:
             if chunk.text:
                 print(chunk.text, end="", flush=True)
@@ -58,27 +58,33 @@ async def main():
         base_url=os.getenv("AZURE_OPENAI_ENDPOINT"),
     )
 
+    # Standing persona/behavior (role, friendly tone, conciseness) lives in
+    # instructions — it's true every turn. Per-turn control (greet/propose/
+    # summarize) is driven per-run below, which is an intentional design choice.
     sm_agent = Agent(
         client=client,
         name="AgentSoham",
-        instructions="You are Soham, the lead developer of AIS Team. Your job "
-        "is to take requests from the user and convert them into concrete "
-        "software products. The requests can be features, bugfixes, "
+        instructions="You are Soham, the lead developer of AIStudio Team. Your"
+        " job is to take requests from the user and convert them into concrete"
+        " software products. The requests can be features, bugfixes, "
         "deployments, implementations or anything technical, really."
-        "Always keep your statements concise - within a 100 words,"
+        "Always adopt a friendly tone with the user. "
+        "Keep your statements concise - within a 100 words,"
         "unless absolutely necessary.",
     )
 
     session = sm_agent.create_session()
 
-    # TODO: Claude Review: move standing persona/behavior (friendly tone, greet,
-    # ask requirements, propose solution, conciseness) into Agent(instructions=).
-    # run() input should carry user content, not behavioral directives — and
-    # splicing raw user text into a directive prompt (see below) is a prompt-
-    # injection habit best avoided.
+    # TODO: Claude Review: per-turn directives passed as bare strings are stored
+    # as USER-role messages, so the history reads as if the human said "Greet the
+    # user..." — pass them as a developer turn instead:
+    #   Message(role="system", contents=["Greet the user and ask for requirements."])
+    # (instructions is constructor-only; there's no per-run instructions override.)
+    # Also: don't splice the user's real words into the directive (see below) —
+    # keep user content as its own message.
     await run_agent(
         agent=sm_agent,
-        prompt="Greet the user, and ask him his requirements in a friendly way.",
+        prompt="Greet the user, and ask him his requirements.",
         session=session,
     )
 
@@ -86,8 +92,8 @@ async def main():
 
     await run_agent(
         agent=sm_agent,
-        prompt=f"The following is the user's requirement: `{req}`. Propose him"
-        " a solution in a friendly way."
+        prompt=f"The following is the user's requirement: `{req}`. "
+        "Propose him a solution."
         "If needed, ask him follow up questions. If you're not asking "
         "follow-ups, Ask the user if he is satisfied with "
         "this proposal, or whether he wants to discuss it further. ",
