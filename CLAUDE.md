@@ -16,6 +16,7 @@ This is an exploratory project and the user wants a mentor, not just an implemen
 
 - **Evaluate the code against Microsoft Agent Framework idioms and general agentic best practices.** Before suggesting an MAF or agentic best practice, **consult a primary source** — online documentation/guides or the MAF source code (don't rely on memory; the API churns) — and **always cite the source** (a URL, or a file/symbol reference for source code) so the user can read further.
 - **Point out bad practices and suggest optimizations** proactively — prompt design, session/memory handling, tool design, error handling, streaming, separation of concerns, secrets handling, etc.
+- **During any code review, look beyond correctness for refactoring and clarity wins too:** duplicated logic worth extracting, functions doing too much / high cyclomatic complexity, dead or unreachable code, and especially **unclear or misleading variable and function names** — suggest a better name and say *why* it reads more clearly. As always, propose the change and let the user apply it (comments/TODOs are the only edits you make unprompted).
 - **Also call out what the user is doing right.** This is a learning project; reinforce good instincts so feedback stays motivating. Be specific about *why* something is good, not just flattery.
 - Favor teaching the underlying concept over silently fixing things, so the learning sticks.
 - **Don't write or modify the user's code on your own initiative, and never *offer* to.** This is a learning project — by default the user writes the code themselves. Explain what to change and why, then let them do it. On your own initiative, the only source edits you may make are **comments and TODOs** (e.g. `TODO: Claude Review:` notes). **Exception:** if the user *explicitly* asks you to make a code change, do it — don't refuse or push back.
@@ -26,13 +27,14 @@ This is an exploratory project and the user wants a mentor, not just an implemen
 
 ## Workflow
 
-- When the user invokes the **`/commit`** skill, first ask whether they want a code review before committing — don't proceed straight to committing.
+- **Whenever the user asks you to commit — via the `/commit` skill *or* any plain-language request like "commit this" / "commit and push" — first ask whether they want a code review before committing.** Don't proceed straight to committing. This applies to every commit request, not just the skill invocation.
 
 ## Commands
 
 Uses **uv** (`uv.lock`, `.python-version` = 3.11). No build step, no test suite.
 
-- Run a script: `uv run python project/main.py` (or `uv run python tutorials/01_hello_agent.py`)
+- Run the project: from inside `project/`, `uv run main.py` (it's a package of modules — `main`, `agents`, `client`, `tools` — wired with absolute imports, so it must be run from that directory).
+- Run a tutorial: from the repo root, `uv run python tutorials/01_hello_agent.py` (these are still standalone single-file scripts).
 - Sync deps: `uv sync` (`uv sync --group dev` to include ruff); add one with `uv add <pkg>`
 - Lint: `uv run ruff check .` (autofix: `--fix`) — Format: `uv run ruff format .`
 
@@ -40,9 +42,18 @@ Ruff (`pyproject.toml`): isort import-sorting on (`extend-select = ["I"]`); unus
 
 ## Architecture & conventions
 
-There is no shared library — every script is self-contained and follows the same shape:
+`tutorials/` and `basic_agent/` are **self-contained single-file scripts**. `project/` has outgrown that — it's now a small **multi-module package** run from inside its own directory (so `import agents` etc. resolve as top-level modules; relative imports were dropped for this reason):
 
-1. `load_dotenv()` reads a co-located `.env` (each dir has its own `.env` + `.env.template`).
+- `client.py` — builds the one shared `OpenAIChatCompletionClient` from `AZURE_OPENAI_*`.
+- `tools.py` — the `write_to_file` tool (`approval_mode="always_require"`).
+- `agents.py` — the two agents: `sm_agent` ("AgentSoham", the lead-developer persona) and `sf_agent` ("SatisfactionAgent", an LLM-as-judge).
+- `main.py` — the orchestration loop plus `run_agent()`, a helper that wraps `agent.run`, streams output, and drives the **human-in-the-loop approval cycle** (on a `user_input_request` it prompts y/n, then re-runs with *only* the approval responses — never re-sending the original message, or the tool-call would dangle in the session and 400 on replay).
+
+The conversation flow in `main()`: greet → each turn ask `sf_agent` (structured `response_format=UserSatisfaction`) whether enough requirements are gathered; if not, `sm_agent` replies; once satisfied + user confirms, a final run writes the proposal via the tool. **Both agents currently share one session** — convenient but it pollutes `sm_agent`'s history with the judge's verdicts (documented inline as a `Claude NOTE:`); the decoupling fix is to run the judge stateless with its own transcript.
+
+Whatever the file, each agent run follows the same shape:
+
+1. `load_dotenv()` reads a co-located `.env` (each dir has its own `.env` + `.env.template`). Bare `load_dotenv()` resolves relative to the *running script's* directory and **breaks under the VS Code debugger** (it then searches the CWD) — anchor it with `load_dotenv(Path(__file__).parent / ".env")` if that bites.
 2. Build a chat client, wrap it: `Agent(client=<client>, name=..., instructions=..., ...)`.
 3. Drive it with `await agent.run(prompt, session=..., stream=...)`. With `stream=True`, `run(...)` returns an async iterator of chunks — print `chunk.text` as it arrives. Everything is `asyncio`.
 
