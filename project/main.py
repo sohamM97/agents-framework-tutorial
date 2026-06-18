@@ -36,7 +36,7 @@ def write_to_file(
     contents: Annotated[str, Field(description="The contents to write in the file")],
     filepath: Annotated[
         str, Field(description="The path at which to write the file")
-    ] = ".",
+    ] = "outputs",
 ):
     file_loc = Path(filepath) / filename
     with open(file_loc, "w") as f:
@@ -45,7 +45,7 @@ def write_to_file(
 
 async def run_agent(
     agent: Agent,
-    message: str | Message | list[Message],
+    message: str | Message | list[Message] = "",
     session: Optional[AgentSession] = None,
     options: Optional[dict] = None,
     # TODO: when options are given, the message is the final json
@@ -57,12 +57,6 @@ async def run_agent(
         message, session=session, stream=show_message, options=options
     )
 
-    # if options:
-    # https://learn.microsoft.com/en-us/agent-framework/agents/structured-outputs?pivots=programming-language-python
-    # final_response = await response.get_final_response()
-    # return final_response.value
-
-    # else:
     if show_message:
         print("\n[AGENT]: ...")
         async for chunk in response:
@@ -89,7 +83,8 @@ async def main():
 
     # Standing persona/behavior (role, friendly tone, conciseness) lives in
     # instructions — it's true every turn. Per-turn control (greet/propose/
-    # summarize) is driven per-run below, which is an intentional design choice.
+    # summarize) is driven per-run below, which is an intentional design
+    # choice.
     # TODO: does this lead to infinite questions till i explictly ask to stop?
     # Yes kinda does. need cap on no. of messages as a safeguard. also clearer
     # system prompts so that the agent does not just keep blabbering on.
@@ -108,21 +103,27 @@ async def main():
         " the user follow-up questions and clarifications till he is satisfied"
         " with the proposal. Keep your statements concise - within a 100 words"
         ", unless absolutely necessary. Do NOT suggest him to input images"
-        "or screenshots since you don't have that capability right now.",
+        " or screenshots since you don't have that capability right now."
+        " DO NOT generate any code samples, that is not your job.",
+        # TODO: maybe to prevent it from arbitrarily writing code, the earlier
+        # approach where WE output the file, is a better approach. The agent
+        # responsible for writing code can use it as a tool.
         tools=[write_to_file],
     )
+
+    session = sm_agent.create_session()
 
     # TODO: multi-intent agent like stop, exit etc.
     sf_agent = Agent(
         client=client,
         name="SatisfactionAgent",
-        instructions="You are an agent who is tasked with analysing the user's"
-        " response, and figuring out whether the user is satisfied with the "
-        "proposed solution. In case he is stating his requirements, wants to "
-        "discuss further, and so on, assume he isn't satisfied just yet.",
+        instructions="You are an agent who is tasked with going thru the "
+        "conversation and figuring out whether Agent Soham has all the "
+        "requirements necessary for the final solution. Output true if the "
+        "agent doesn't need to ask the user any more questions to draft the "
+        "final proposal. Output false if you feel the agent needs more inputs "
+        "from the user before drafting the final project plan.",
     )
-
-    session = sm_agent.create_session()
 
     bot_message = await run_agent(
         agent=sm_agent,
@@ -135,19 +136,17 @@ async def main():
 
     while True:
         user_response = await take_input_from_user()
+        # TODO: Claude Review: (#1 stale check + #2 session pollution) sf_agent
+        # reads the shared session here, but (a) user_response isn't in the
+        # session yet, so the judge decides one turn behind, and (b) running
+        # sf_agent on the shared session writes its empty-input + {satisfied}
+        # verdict back into sm_agent's history (InMemoryHistoryProvider stores
+        # messages in session state — _agents.py:416-420). Prefer handing the
+        # judge the transcript explicitly (bot_message + user_response) and
+        # keeping it off this session.
         user_satisfaction_info = await run_agent(
             agent=sf_agent,
-            message=[
-                Message(
-                    role="user",
-                    contents=[
-                        f"Assistant's proposal:"
-                        f"\n{bot_message}"
-                        "\n\nUser's reply:"
-                        f"\n{user_response}"
-                    ],
-                )
-            ],
+            session=session,
             options={"response_format": UserSatisfaction},
             show_message=False,
         )
@@ -157,9 +156,18 @@ async def main():
         )
 
         if satisfied:
-            print("\n[AGENT]: Looks like the user is satisfied.")
-            break
+            print(
+                "\n[AGENT]: Looks like we have everything we need. Should we "
+                "proceed with the final proposal? (y/n)"
+            )
+            final = await take_input_from_user()
+            if final.lower() == "y":
+                break
 
+        # TODO: Claude Review: (#3) on a non-"y" answer, `final` is discarded
+        # and we replay the stale `user_response` — the user's redirection is
+        # lost. Feed `final` back into sm_agent instead so they can course-
+        # correct.
         bot_message = await run_agent(
             agent=sm_agent, message=user_response, session=session
         )
@@ -173,10 +181,12 @@ async def main():
             role="system",
             contents=[
                 "Generate a proposal file name relevant to the discussion and "
-                "write the proposal to the file using the write_to_file tool."
-                "Once that is done, Summarize the discussion, tell the user "
+                "write the proposal to the file using the write_to_file tool. "
+                "Once that is done, summarize the discussion, tell the user "
                 "that the proposal file is present, give him the path, and "
-                "tell him he will have a finished product shortly."
+                "tell him he will have a finished product shortly. DO NOT ask "
+                "any questions at this stage, as this is supposed to be the "
+                "final approach."
             ],
         ),
         session=session,
