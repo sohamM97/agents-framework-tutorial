@@ -1,14 +1,14 @@
 import asyncio
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 from agent_framework import Agent, AgentResponse, AgentSession, Message, tool
 
 # TODO: learn more about ChatClient vs ChatCompletionClient
 from agent_framework.openai import OpenAIChatCompletionClient
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -21,13 +21,23 @@ class UserSatisfaction(BaseModel):
     satisfied: bool
 
 
+# Unused for now. Was using it when I had asked the agent to output just the
+# text and filename, and was writing to file myself.
 class ProposalFileDetails(BaseModel):
     filename: str
     proposal: str
 
 
-# @tool(approval_mode="always_require")
-def write_to_file(filename: str, contents: str, filepath: str = "."):
+# TODO: facing some issue in always_require. Have to look into that.
+@tool(approval_mode="never_require")
+def write_to_file(
+    # TODO: is annotation required for the LLM? Or just for us?
+    filename: Annotated[str, Field(description="The name of the file to create")],
+    contents: Annotated[str, Field(description="The contents to write in the file")],
+    filepath: Annotated[
+        str, Field(description="The path at which to write the file")
+    ] = ".",
+):
     file_loc = Path(filepath) / filename
     with open(file_loc, "w") as f:
         f.write(contents)
@@ -38,11 +48,11 @@ async def run_agent(
     message: str | Message | list[Message],
     session: Optional[AgentSession] = None,
     options: Optional[dict] = None,
+    # TODO: when options are given, the message is the final json
+    # Is there any way to show a proper msg as well as a json?
+    # If not, we can get rid of this extra flag.
     show_message: bool = True,
 ) -> AgentResponse:
-    # TODO: Claude Review: don't stream decision/structured calls — when options
-    # is set we never iterate chunks, so stream=True just adds overhead. Stream
-    # only user-facing turns; use stream=False for the structured branch.
     response = await agent.run(
         message, session=session, stream=show_message, options=options
     )
@@ -84,7 +94,8 @@ async def main():
     # Yes kinda does. need cap on no. of messages as a safeguard. also clearer
     # system prompts so that the agent does not just keep blabbering on.
     # Shouldn't just depend on user's satisfaction, as user is never gonna be
-    # satisfied while agent keeps on asking.
+    # satisfied while agent keeps on asking. Maybe it should be based on the
+    # agent's satisfaction.
     sm_agent = Agent(
         client=client,
         name="AgentSoham",
@@ -92,12 +103,13 @@ async def main():
         " job is to take requests from the user and convert them into concrete"
         " software products. The requests can be features, bugfixes, "
         "deployments, implementations or anything technical, really."
-        "Always adopt a friendly tone with the user. Keep asking the user "
-        "follow-up questions and clarifications till he is satisfied with the "
-        "proposal. Keep your statements concise - within a 100 words,"
-        "unless absolutely necessary. Do NOT suggest him to input images"
+        "Encourage the user to be as detailed as possible while asking for "
+        "requirements. Always adopt a friendly tone with the user. Keep asking"
+        " the user follow-up questions and clarifications till he is satisfied"
+        " with the proposal. Keep your statements concise - within a 100 words"
+        ", unless absolutely necessary. Do NOT suggest him to input images"
         "or screenshots since you don't have that capability right now.",
-        # tools=[write_to_file],
+        tools=[write_to_file],
     )
 
     # TODO: multi-intent agent like stop, exit etc.
@@ -145,6 +157,7 @@ async def main():
         )
 
         if satisfied:
+            print("\n[AGENT]: Looks like the user is satisfied.")
             break
 
         bot_message = await run_agent(
@@ -154,26 +167,22 @@ async def main():
 
     # once user is satisfied
 
-    final_response = await run_agent(
+    await run_agent(
         agent=sm_agent,
         message=Message(
             role="system",
             contents=[
-                "Summarize the discussion you had with the user and the "
-                "deliverables. Write the proposal to the file using the "
-                "write_to_file tool, inform the user of the same and tell the "
-                "user you will return with the finished product shortly."
+                "Generate a proposal file name relevant to the discussion and "
+                "write the proposal to the file using the write_to_file tool."
+                "Once that is done, Summarize the discussion, tell the user "
+                "that the proposal file is present, give him the path, and "
+                "tell him he will have a finished product shortly."
             ],
         ),
         session=session,
-        options={"response_format": ProposalFileDetails},
     )
-    # TODO: a tool to output the plan in a text file. maybe a summary of the transcript too.
-    # With confirmation from user.
-    # TODO: change it so that the agent does this
-    write_to_file(
-        filename=final_response.value.filename, contents=final_response.value.proposal
-    )
+
+    # TODO: maybe a summary of the transcript too. With confirmation from user.
 
 
 if __name__ == "__main__":
