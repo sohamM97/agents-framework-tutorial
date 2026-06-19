@@ -16,7 +16,12 @@ def write_to_file(
         str, Field(description="The path at which to write the file")
     ] = "outputs",
 ) -> Path:
-    file_loc = BASE_DIR / filepath / filename
+    file_abs_path: Path = BASE_DIR / filepath
+
+    if not file_abs_path.exists():
+        file_abs_path.mkdir(parents=True, exist_ok=True)
+
+    file_loc = file_abs_path / filename
     file_loc.write_text(contents)
     return file_loc
 

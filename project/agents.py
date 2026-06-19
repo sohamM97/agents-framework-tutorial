@@ -55,3 +55,6 @@ xl_agent = Agent(
     " also output a well documented README.md file.",
     tools=[read_from_file, write_to_file],
 )
+
+
+# TODO: code review agent can use thinking

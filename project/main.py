@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import Optional
 
 from agent_framework import Agent, AgentResponse, AgentSession, Message
@@ -19,8 +20,8 @@ class UserSatisfaction(BaseModel):
     satisfied: bool
 
 
-class ProposalFileDetails(BaseModel):
-    filename: str
+class ProjectDetails(BaseModel):
+    project_name: str
     proposal: str
 
 
@@ -99,6 +100,9 @@ async def main():
 
     await run_agent(
         agent=sm_agent,
+        # System messages must be developer-controlled. Never inject user input
+        # into system messages.
+        # Source: https://learn.microsoft.com/en-us/agent-framework/agents/safety#keep-system-messages-developer-controlled
         messages=Message(
             role="system", contents=["Greet the user, and ask him his requirements."]
         ),
@@ -152,28 +156,33 @@ async def main():
 
     # once user is satisfied
 
-    # TODO: need proper directory structure
     bot_response = await run_agent(
         agent=sm_agent,
         messages=Message(
             role="system",
             contents=[
-                "Generate a proposal file name (just the name, not a full "
-                "path) relevant to the discussion and the proposal itself. "
-                "The file should be a markdown file."
+                "Generate a project name and a proposal based on your "
+                "discussion. The project name should be in snake_case. "
+                "The proposal contents should be in markdown format."
             ],
         ),
         session=sm_session,
-        options={"response_format": ProposalFileDetails},
+        options={"response_format": ProjectDetails},
         show_message=False,
     )
     proposal_details = bot_response.value
+
+    # Create a project directory that will consist of the proposal and the
+    # project source code
+    project_path = Path("outputs") / proposal_details.project_name
 
     # We write the proposal file ourselves to keep it deterministic. Else,
     # Agent Soham tended to write python scripts in spite of being instructed
     # against that in the system prompt.
     proposal_file_path = write_to_file(
-        filename=proposal_details.filename, contents=proposal_details.proposal
+        filename="proposal.md",
+        contents=proposal_details.proposal,
+        filepath=project_path,
     )
 
     await run_agent(
@@ -200,7 +209,11 @@ async def main():
             role="system",
             contents=[
                 f"Read the contents of this proposal: {proposal_file_path} and"
-                " code a working solution."
+                f" code a working solution at {project_path / 'out'} "
+                "directory. IMPORTANT: All project related files (source code,"
+                " readme etc.) should be mandatorily inside the 'out' "
+                "directory. Once you are done coding, inform the user and give"
+                " him the path where your code is."
             ],
         ),
         session=xl_session,
