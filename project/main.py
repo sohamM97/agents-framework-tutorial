@@ -22,11 +22,11 @@ from tools import write_to_file
 # which will trigger amma agent directly instead of going thru the whole flow.
 
 
-async def _collect_approvals(chunk) -> list:
+async def _collect_approvals(chunk, agent_name: str) -> list:
     approvals = []
 
     for request in chunk.user_input_requests:
-        print("\nApproval needed:")
+        print(f"\n{agent_name} needs approval:")
         print(f" Function: {request.function_call.name}")
         print(f" Arguments: {request.function_call.arguments}")
         print("Enter 'y' or 'n'.")
@@ -77,7 +77,7 @@ async def run_agent(
 
             if chunk.user_input_requests:
                 has_user_input_requests = True
-                approvals = await _collect_approvals(chunk)
+                approvals = await _collect_approvals(chunk, agent.name)
                 pending.extend(approvals)
 
         print()
@@ -222,7 +222,14 @@ async def main():
         session=xl_session,
     )
 
-    lgtm = False
+    # TODO: Claude Review: unbounded `while True` — if Amma never returns
+    # lgtm=True, XL and Amma ping-pong forever, each round costing model calls
+    # (Amma runs at reasoning_effort="high"). Add a max_rounds cap, same
+    # safeguard the Soham loop's TODO calls for in agents.py.
+    # Claude NOTE: a workflow gives this cap for free — WorkflowBuilder takes a
+    # max_iterations arg (default 100) that limits how many rounds the engine
+    # runs, so an Amma<->XL review loop built as a workflow can't run forever.
+    # See agent_framework/_workflows/_workflow_builder.py:80 (and _runner.py).
 
     while True:
         amma_session = amma_agent.create_session()
@@ -235,9 +242,10 @@ async def main():
             ),
             session=amma_session,
         )
-        lgtm = code_review.value and code_review.value.lgtm
+        if not code_review.value:
+            raise ValueError("LLM failed to return value")
 
-        if lgtm:
+        if code_review.value.lgtm:
             break
 
         # TODO: make sure agent reads existing files using read tool also to
