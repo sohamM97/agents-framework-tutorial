@@ -13,5 +13,6 @@ class ProjectDetails(BaseModel):
 
 
 class CodeReviewOutput(BaseModel):
+    success: bool = True
     lgtm: bool
     comments: str

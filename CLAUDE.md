@@ -29,6 +29,12 @@ This is an exploratory project and the user wants a mentor, not just an implemen
 ## Workflow
 
 - **Whenever the user asks you to commit — via the `/commit` skill *or* any plain-language request like "commit this" / "commit and push" — first ask whether they want a code review before committing.** Don't proceed straight to committing. This applies to every commit request, not just the skill invocation.
+- **If that review surfaces any findings, do NOT commit right away.** Present the findings, then stop and offer these three options, letting the user pick:
+  1. **Wait** — pause so the user can address the issues themselves; commit later once they're done.
+  2. **Add TODOs** — drop `TODO: Claude Review:` comments on the flagged issues, then commit.
+  3. **Commit right away** — commit as-is, leaving the findings unaddressed.
+
+  (If the review comes back clean with no findings, just commit — no need to ask.)
 
 ## Commands
 

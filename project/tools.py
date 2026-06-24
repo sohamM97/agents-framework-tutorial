@@ -2,9 +2,8 @@ from pathlib import Path
 from typing import Annotated
 
 from agent_framework import tool
+from constants import BASE_DIR, OUTPUTS_DIR
 from pydantic import Field
-
-BASE_DIR = Path(__file__).parent
 
 
 @tool(approval_mode="always_require")
@@ -31,7 +30,27 @@ def read_from_file(
         str, Field(description="The full location of the file to be read")
     ],
 ) -> str:
+    # TODO: keep this in a function
+    target = Path(file_location).resolve()
+    if not target.is_relative_to(OUTPUTS_DIR.resolve()):
+        return f"Refused: {target} is outside the outputs directory"
+
     try:
-        return Path(file_location).read_text()
+        return target.read_text()
+    except IsADirectoryError:
+        return f"{target} is a directory"
     except Exception as exc:
         return f"Failed to read file: {exc}"
+
+
+@tool(approval_mode="never_require")
+def get_files_under_dir(
+    directory_path: Annotated[
+        str, Field(description="The full location of the directory to be read")
+    ],
+) -> str | list[Path]:
+    target = Path(directory_path).resolve()
+    if not target.is_relative_to(OUTPUTS_DIR.resolve()):
+        return f"Refused: {target} is outside the outputs directory"
+
+    return [p for p in target.rglob("*") if p.is_file()]

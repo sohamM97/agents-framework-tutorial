@@ -1,9 +1,9 @@
 import asyncio
-from pathlib import Path
 from typing import Optional
 
 from agent_framework import Agent, AgentResponse, AgentSession, Message
 from agents import amma_agent, judge_agent, sm_agent, xl_agent
+from constants import OUTPUTS_DIR
 from models import ProjectDetails
 from tools import write_to_file
 
@@ -174,7 +174,7 @@ async def main():
     # write_to_file re-roots every filepath under BASE_DIR — a latent footgun if
     # that ever changes. Make them consistent: either root project_path at
     # BASE_DIR too, or have write_to_file return a path relative to BASE_DIR.
-    project_path = Path("outputs") / proposal_details.project_name
+    project_path = OUTPUTS_DIR / proposal_details.project_name
 
     # We write the proposal file ourselves to keep it deterministic. Else,
     # Agent Soham tended to write python scripts in spite of being instructed
@@ -222,6 +222,8 @@ async def main():
         session=xl_session,
     )
 
+    # TODO: error handling - if code is not generated because of any error,
+    # goes in infinite loop. Add a flag for review success or failure
     # TODO: Claude Review: unbounded `while True` — if Amma never returns
     # lgtm=True, XL and Amma ping-pong forever, each round costing model calls
     # (Amma runs at reasoning_effort="high"). Add a max_rounds cap, same
@@ -238,14 +240,15 @@ async def main():
         code_review = await run_agent(
             agent=amma_agent,
             messages=Message(
-                role="system", contents=[f"Review the code at {project_path / 'out'}"]
+                role="system",
+                contents=[f"Review the code under directory: {project_path / 'out'}"],
             ),
             session=amma_session,
         )
         if not code_review.value:
             raise ValueError("LLM failed to return value")
 
-        if code_review.value.lgtm:
+        if code_review.value.lgtm or not code_review.value.success:
             break
 
         # TODO: make sure agent reads existing files using read tool also to

@@ -1,7 +1,7 @@
 from agent_framework import Agent
 from client import client
 from models import CodeReviewOutput, RequirementsReady
-from tools import read_from_file, write_to_file
+from tools import get_files_under_dir, read_from_file, write_to_file
 
 # Standing persona/behavior (role, friendly tone, conciseness) lives in
 # instructions — it's true every turn. Per-turn control (greet/propose/
@@ -66,8 +66,13 @@ amma_agent = Agent(
     " line. You are able to look at the code and use your reasoning "
     "capabilities to think about all possible edge cases the developer has "
     "missed. Once you're done, output a boolean - lgtm (looks good to me) "
-    "and your review comments.",
-    tools=[read_from_file],
+    "and your review comments. STRICT INSTRUCTIONS - if you're given the "
+    "directory under which the code resides, only read files under that "
+    "directory. Do not try to read anything outside it. If any of your tool "
+    "calls fail, let the user know what exactly the error is, for easier "
+    "debugging. If you were not able to complete the review successfully "
+    "(for e.g., in case of tool call failures), output success: False.",
+    tools=[read_from_file, get_files_under_dir],
     # TODO: show reasoning steps
     default_options={"response_format": CodeReviewOutput, "reasoning_effort": "high"},
 )
