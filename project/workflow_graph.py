@@ -38,6 +38,7 @@ from agent_framework import (
     AgentExecutor,
     AgentExecutorRequest,
     AgentExecutorResponse,
+    AgentResponseUpdate,
     Case,
     Default,
     Executor,
@@ -56,29 +57,53 @@ from pydantic import BaseModel
 from tools import write_to_file
 
 
-# The payload we hand the driver whenever we need a human turn. `kind` lets the
-# ONE response_handler below tell a requirements answer apart from a yes/no
-# confirmation; `text` is what the driver prints before reading input.
+# The payload we hand the driver whenever we need a human turn. It carries only
+# `kind` so the ONE response_handler below can tell a requirements answer apart
+# from a yes/no confirmation.
+# Claude: the prompt TEXT used to live here (the driver printed it). It doesn't
+# anymore — Soham's words are now streamed live as workflow output (see
+# _stream_soham), so the driver just needs to know a human turn is pending and how
+# to route the answer.
 # SOHAM: This can be either dataclass or pydantic model.
 class UserPrompt(BaseModel):
-    text: str
     kind: Literal["requirements", "confirm"]
+
+
+async def _stream_soham(agent, message, session, ctx) -> None:
+    """Run Soham with streaming and surface each chunk as workflow output.
+
+    Claude: yielding the updates (instead of running non-streamed and yielding one
+    final string) is what makes his words type out live via _stream_segment, under
+    his "Soham" label. Iterating the stream to the end also finalizes the run and
+    writes it into the shared session — ResponseStream calls get_final_response()
+    on exhaustion (_types.py:3117-3120) — so his conversation memory stays intact.
+
+    Claude: contrast with the earlier NON-streaming version — there Soham's text
+    rode inside the UserPrompt and reached the driver as part of the request_info
+    event (the driver printed `prompt.text` before reading input); it was never a
+    yield_output. Streaming flips that: the text goes out via yield_output here, and
+    request_info now carries only the routing `kind`.
+    """
+    async for update in agent.run(message, session=session, stream=True):
+        # SOHAM: ctx.yield_output yields the outputs of the workflow which the user
+        # sees. If agents/agentexecutors are present in the workflow, all of their
+        # outputs are yielded by default, unless output_from is set.
+        await ctx.yield_output(update)
 
 
 # ---------------------------------------------------------------------------
 # Front half: interactive requirements gathering (human-in-the-loop)
 # ---------------------------------------------------------------------------
-# TODO: understand how this works as this is a loop in a single executor:
-# how does it decide when to end?
-# TODO: once that's done, can we figure out how to do it thru adding edges etc
+# TODO: can this be done thru adding edges etc
 class GatherRequirements(Executor):
     """Owns the Soham<->user<->Judge loop, then emits a ProjectDetails downstream.
 
     NOTE — request_info in the GRAPH API does NOT return inline. Calling
-    `await ctx.request_info(...)` only SUSPENDS the run; the human's answer is
-    delivered to a separate @response_handler (paired by request/response types).
-    That is why this reads as a small state machine (`run` kicks it off, the
-    response_handler is the loop body) instead of a straight-line `while`.
+    `await ctx.request_info(...)` does not give back the user's answer; it just
+    pauses the run. The answer arrives later in a separate @response_handler
+    method (matched by request/response types). So instead of one `while` loop,
+    the work is split in two: `run` starts it, and the response_handler runs
+    once per answer to continue.
     """
 
     def __init__(self, sm_agent, judge, sm_session, id: str = "gather"):
@@ -96,29 +121,39 @@ class GatherRequirements(Executor):
     # TODO: figure out the input-output deal - what exactly is the expected
     # data type of ctx? Refer guessing game tutorial or the docs.
     # TODO: 1. expected data type of ctx and how it is different from the function's own args
-    # TODO: 2. difference between send_message and yield_output
     # TODO: does every executor have a single handler? (and response_handler?)
     # Answer: NO (https://learn.microsoft.com/en-us/agent-framework/workflows/executors?pivots=programming-language-python)
     # Is it for multiple input data types? Same with response handler?
     @handler
-    async def run(self, _trigger: str, ctx: WorkflowContext[ProjectDetails]) -> None:
+    async def run(
+        self,
+        _trigger: str,
+        ctx: WorkflowContext[ProjectDetails, AgentResponseUpdate | str],
+    ) -> None:
         # System messages stay developer-controlled (never interpolate user input):
         # https://learn.microsoft.com/en-us/agent-framework/agents/safety#keep-system-messages-developer-controlled
-        greeting = await self._sm_agent.run(
+        # Claude: stream Soham's greeting out as workflow output FIRST (so it types
+        # out live), then pause for the user's answer.
+        await _stream_soham(
+            self._sm_agent,
             Message(
                 role="system",
                 contents=["Greet the user, and ask him his requirements."],
             ),
-            session=self._session,
+            self._session,
+            ctx,
         )
         # SOHAM: ctx.request_info is used when asking input from the user.
         # The executor must have a @response_handler method to handle user inputs.
         # Source: https://learn.microsoft.com/en-us/agent-framework/workflows/human-in-the-loop?pivots=programming-language-python
-        await ctx.request_info(UserPrompt(text=greeting.text, kind="requirements"), str)
+        await ctx.request_info(UserPrompt(kind="requirements"), str)
 
     @response_handler
     async def on_human_turn(
-        self, request: UserPrompt, response: str, ctx: WorkflowContext[ProjectDetails]
+        self,
+        request: UserPrompt,
+        response: str,
+        ctx: WorkflowContext[ProjectDetails, AgentResponseUpdate | str],
     ) -> None:
         if request.kind == "confirm" and response.strip().lower() == "y":
             # Proposal generated from the shared session, which by now holds the
@@ -160,18 +195,19 @@ class GatherRequirements(Executor):
         ready = bool(verdict.value and verdict.value.ready)
 
         if ready:
-            await ctx.request_info(
-                UserPrompt(
-                    text="Looks like we have everything we need. Should we proceed "
-                    "with the final proposal? (y/n)",
-                    kind="confirm",
-                ),
-                str,
+            # Claude: this prompt is a fixed string (not an agent reply), so we just
+            # yield it as one output event — it still shows up under "Soham" via
+            # _stream_segment — then pause for the y/n.
+            await ctx.yield_output(
+                "Looks like we have everything we need. Should we proceed "
+                "with the final proposal? (y/n)"
             )
+            await ctx.request_info(UserPrompt(kind="confirm"), str)
             return
 
-        reply = await self._sm_agent.run(response, session=self._session)
-        await ctx.request_info(UserPrompt(text=reply.text, kind="requirements"), str)
+        # Claude: stream Soham's follow-up question live, then pause for more input.
+        await _stream_soham(self._sm_agent, response, self._session, ctx)
+        await ctx.request_info(UserPrompt(kind="requirements"), str)
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +333,10 @@ class PresentProposal(Executor):
         ctx: WorkflowContext[AgentExecutorRequest, str],
     ) -> None:
         proposal_file_path = ctx.get_state("proposal_file_path")
-        summary = await self._sm_agent.run(
+        # Claude: stream the summary so it types out live under "Soham" (executor_id
+        # "present"); _stream_soham yields one update per chunk.
+        await _stream_soham(
+            self._sm_agent,
             Message(
                 role="system",
                 contents=[
@@ -308,12 +347,9 @@ class PresentProposal(Executor):
                     "final approach."
                 ],
             ),
-            session=self._session,
+            self._session,
+            ctx,
         )
-        # SOHAM: ctx.yield_output yields the final outputs of the workflow
-        # which user sees.
-        # emitted with executor_id="present" in this executor's init method
-        await ctx.yield_output(summary.text)
         await ctx.send_message(xl_request)  # -> xl starts coding
 
 
@@ -362,22 +398,47 @@ def build_workflow():
 
 
 # Claude: map executor ids -> the agent persona behind them, so outputs are
-# attributed correctly. Every AgentExecutor yields its OWN response as a workflow
-# output (_agent_executor.py:432), so xl and amma each surface here; without this
-# map the old driver mislabeled Amma's review as "Soham".
-EXECUTOR_LABELS = {"present": "Soham", "xl": "XL", "amma": "Amma"}
+# attributed correctly. Every AgentExecutor yields its OWN reply as workflow
+# output, so xl and amma each surface here; without this map the driver would
+# mislabel Amma's review as "Soham".
+EXECUTOR_LABELS = {"gather": "Soham", "present": "Soham", "xl": "XL", "amma": "Amma"}
 
 
-def _print_segment_outputs(result) -> None:
-    # A WorkflowRunResult is a list of the events from THAT run() call, so printing
-    # its outputs each segment surfaces messages in the order they're produced
-    # (Soham's announce, then XL's code report, then Amma's review) rather than as
-    # one batch at the end.
-    for event in result:
-        if event.type == "output":
-            text = getattr(event.data, "text", None) or str(event.data)
+async def _stream_segment(stream):
+    """Render one streaming run's output live, then return its WorkflowRunResult.
+
+    Claude: with stream=True, each AgentExecutor (XL, Amma) — and Soham too, whose
+    turns we stream via _stream_soham — sends its reply as a run of 'output' events
+    whose data is an AgentResponseUpdate, one small text chunk per event. So we
+    print a labeled header the first time a source speaks, then print its chunks
+    inline as they arrive (this is the live typing effect).
+
+    Two things to know:
+    - A plain-string yield (the fixed y/n confirm prompt) arrives as a SINGLE output
+      event rather than a run of chunks, so it prints in one go. We handle both by
+      reading .text when present and falling back to str(event.data).
+    - We must keep an empty chunk empty (a chunk's .text is "" on some updates).
+      Using `chunk or str(...)` would wrongly dump the raw update object for those,
+      so we check `is None` instead.
+    """
+    last_source = None
+    async for event in stream:
+        if event.type != "output":
+            continue
+        # AgentResponseUpdate has .text (the chunk); a plain-string yield does not.
+        chunk = getattr(event.data, "text", None)
+        if chunk is None:
+            chunk = str(event.data)
+        if event.executor_id != last_source:
             label = EXECUTOR_LABELS.get(event.executor_id, event.executor_id)
-            print(f"\n[AGENT {label}]: {text}")
+            print(f"\n[AGENT {label}]: ", end="", flush=True)
+            last_source = event.executor_id
+        print(chunk, end="", flush=True)
+    if last_source is not None:
+        print()  # close off the last streamed line
+    # The run is finished (idle or paused for input); hand back the full result so
+    # the caller can read any pending request_info events.
+    return await stream.get_final_response()
 
 
 async def take_input_from_user() -> str:
@@ -390,18 +451,22 @@ async def answer_pending_requests(requests) -> dict:
     NOTE — two kinds of request flow through here:
       1. UserPrompt  — our own conversational asks from GatherRequirements.
       2. function-approval requests — auto-surfaced by AgentExecutor when XL calls
-         write_to_file (approval_mode="always_require"). The AgentExecutor converts
-         the agent's user_input_requests into workflow request_info events
-         (_agent_executor.py:434-439) and resumes the agent once we answer. So the
-         `always_require` approval survives the port for free — we just reuse the
-         same `to_function_approval_response` call main.py used.
+         write_to_file (approval_mode="always_require"). The AgentExecutor turns the
+         agent's user_input_requests into workflow request_info events, then resumes
+         the agent once we answer.
+         Claude NOTE — because we now run with stream=True, this conversion happens
+         in the STREAMING branch: the approval prompt only shows up AFTER XL's tokens
+         finish streaming, not mid-stream (_agent_executor.py:529-543; the
+         non-streaming version that did the same is :447-449).
+         Either way the `always_require` approval survives the port for free — we
+         reuse the same `to_function_approval_response` call main.py used.
     """
     responses = {}
     for event in requests:
         data = event.data
         if isinstance(data, UserPrompt):
-            if data.text:
-                print(f"\n[AGENT Soham]: {data.text}")
+            # Claude: nothing to print here anymore — Soham's question already
+            # streamed out as workflow output. We just collect the user's answer.
             responses[event.request_id] = await take_input_from_user()
         elif hasattr(data, "to_function_approval_response"):
             print(f"\n{event.source_executor_id} needs approval:")
@@ -432,11 +497,13 @@ async def main():
     # If we try workflow.run() without any input:
     # ValueError: Must provide at least one of: 'message' (new run),
     # 'responses' (send responses), or 'checkpoint_id' (resume from checkpoint).
-    result = await workflow.run("start")
+    # Claude: stream=True makes run() return a ResponseStream we iterate live, so
+    # every agent (Soham, XL, Amma) types out its reply instead of dumping it in one
+    # block. The run -> answer -> resume loop is otherwise identical; _stream_segment
+    # renders the events and hands back the WorkflowRunResult so we can still read
+    # its pending requests.
+    result = await _stream_segment(workflow.run("start", stream=True))
     while True:
-        # Surface this segment's agent outputs (labeled by source) before pausing
-        # for the next human turn, so the transcript reads in chronological order.
-        _print_segment_outputs(result)
         # SOHAM: the following is basically the workflow equivalent of
         # result.user_input_requests which we get while calling standalone agents
         # (or chunk.user_input_requests in case of streaming).
@@ -444,7 +511,7 @@ async def main():
         if not requests:
             break
         responses = await answer_pending_requests(requests)
-        result = await workflow.run(responses=responses)
+        result = await _stream_segment(workflow.run(responses=responses, stream=True))
 
 
 if __name__ == "__main__":
@@ -452,4 +519,3 @@ if __name__ == "__main__":
 
 
 # TODO: next up - checkpointing
-# TODO: try with streaming - ask claude only to do it
