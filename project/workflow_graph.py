@@ -118,12 +118,15 @@ class GatherRequirements(Executor):
         # PresentProposal announce later read this same, complete session.
         self._session = sm_session
 
-    # TODO: figure out the input-output deal - what exactly is the expected
-    # data type of ctx? Refer guessing game tutorial or the docs.
-    # TODO: 1. expected data type of ctx and how it is different from the function's own args
-    # TODO: does every executor have a single handler? (and response_handler?)
-    # Answer: NO (https://learn.microsoft.com/en-us/agent-framework/workflows/executors?pivots=programming-language-python)
-    # Is it for multiple input data types? Same with response handler?
+    # SOHAM: in an executor, the function args (_trigger in this case) denote
+    # the expected input data type, while the WorkflowContext[_, _] data types
+    # denote the send_message and yield_output data types respectively. So in
+    # this case, the executor sends message of type ProjectDetails to the next
+    # executor in the graph, and yields AgentResponseUpdate or str as workflow
+    # output. Every (class-based) executor has ONE HANDLER PER INPUT TYPE,
+    # Source:
+    # https://learn.microsoft.com/en-us/agent-framework/workflows/executors?pivots=programming-language-python
+    # TODO: why is ctx send_message type ProjectDetails here?
     @handler
     async def run(
         self,
@@ -148,6 +151,7 @@ class GatherRequirements(Executor):
         # Source: https://learn.microsoft.com/en-us/agent-framework/workflows/human-in-the-loop?pivots=programming-language-python
         await ctx.request_info(UserPrompt(kind="requirements"), str)
 
+    # TODO: get clarity on args and ctx
     @response_handler
     async def on_human_turn(
         self,
